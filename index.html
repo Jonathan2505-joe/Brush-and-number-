@@ -190,7 +190,7 @@ h2{font-family:var(--display);font-weight:400;font-size:30px;line-height:1;margi
             <i style="background:#e8503a"></i><i style="background:#f4c531"></i><i style="background:#3f8f6b"></i><i style="background:#2f62c9"></i><i style="background:#7a3f7d"></i>
           </div>
         </div>
-        <p class="lede">כל תמונה הופכת לערכת צביעה לפי מספרים. מעלים תמונה, בוחרים רמת פירוט, וצובעים במכחול על בד. הצבע חושף את גווני התמונה המקורית, כך שהציור הגמור נראה כמו ציור שמן אמיתי.</p>
+        <p class="lede">כל תמונה הופכת לערכת צביעה לפי מספרים. מעלים תמונה, בוחרים רמת פירוט, וצובעים במכחול על בד. הצבע חושף את התמונה המקורית, וכשהציור מושלם מתגלה התמונה האמיתית במלוא החדות.</p>
       </header>
 
       <label id="upload" class="upload" for="file">
@@ -814,7 +814,7 @@ void main(){
 const FS_VIEW = `#version 300 es
 precision highp float;
 uniform sampler2D uRegion, uNum, uPaint, uHeight, uSrc, uPal, uBoard;
-uniform vec2 uLabel, uView; uniform vec3 uX; uniform float uSel, uInk, uFlip, uShadow, uPx, uReal;
+uniform vec2 uLabel, uView; uniform vec3 uX; uniform float uSel, uInk, uFlip, uShadow, uPx, uReal, uPhoto;
 uniform vec3 uHi, uHiEdge;
 out vec4 o;
 ${GLSL_COMMON}
@@ -857,19 +857,23 @@ void main(){
   float line = 1. - smoothstep(min(0.5+0.667*(hw-aa*0.5), 0.93), min(0.5+0.667*(hw+aa*0.5), 0.99), mk.y);
   float ink = max(line*0.85, texture(uNum, uv).a)*uInk;
   canv = mix(canv, inkCol, ink*0.82);
+  vec3 real = texture(uSrc, uv).rgb; float wr = 0.;
   if(uReal > 0.){
     float idx = texelFetch(uRegion, clamp(ivec2(floor(lp)), ivec2(0), ivec2(uLabel)-1), 0).r*255.;
     vec3 pal = texelFetch(uPal, ivec2(int(idx+.5), 0), 0).rgb;
-    vec3 real = texture(uSrc, uv).rgb;
     float w = max(1.-smoothstep(0.05,0.14,distance(pig,pal)), 1.-smoothstep(0.10,0.22,distance(pig,real)));
-    pig = mix(pig, real, w*uReal*smoothstep(0.35,0.8,cov));
+    wr = w*uReal*smoothstep(0.35,0.8,cov);
+    pig = mix(pig, real, wr);
   }
   vec3 col = mix(canv, pig, cov);
+  // correctly painted areas keep only a faint trace of the brush, so they read as the photo rather than as oil paint
+  float calm = wr*cov*0.8;
   float shade = clamp(mix(1., diff, mix(0.42, 0.6, cov)), 0.6, 1.32);
-  col *= shade;
+  col *= mix(shade, 1., calm);
   vec3 Hv = normalize(L+vec3(0.,0.,1.));
   float sp = pow(max(dot(n,Hv),0.), 36.);
-  col += sp*cov*0.11;
+  col += sp*cov*0.11*(1.-calm);
+  if(uPhoto > 0.) col = mix(col, real, uPhoto);
   o = vec4(clamp(col,0.,1.), 1.);
 }`;
 
@@ -932,8 +936,14 @@ function gpuLoad(pz){
   t.bkPaint = mkTex(PW, PH, gl.NEAREST); t.bkHeight = mkTex(PW, PH, gl.NEAREST);
   t.probe = mkTex(W, H, gl.NEAREST);
   t.board = mkTex(PW, PH, gl.LINEAR);
-  G.real = pz.src ? 1 : 0;
-  t.src = pz.src ? mkTex(W, H, gl.LINEAR, gl.RGBA8, gl.RGBA, pz.src) : mkTex(1, 1, gl.NEAREST);
+  G.real = (pz.hiImg || pz.src) ? 1 : 0;
+  if (pz.hiImg){
+    t.src = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t.src);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, pz.hiImg);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  } else t.src = pz.src ? mkTex(W, H, gl.LINEAR, gl.RGBA8, gl.RGBA, pz.src) : mkTex(1, 1, gl.NEAREST);
   const pal = new Uint8Array(pz.palette.length * 4);
   pz.palette.forEach((c, i) => { pal[i * 4] = c[0]; pal[i * 4 + 1] = c[1]; pal[i * 4 + 2] = c[2]; pal[i * 4 + 3] = 255; });
   t.pal = mkTex(pz.palette.length, 1, gl.NEAREST, gl.RGBA8, gl.RGBA, pal);
@@ -999,7 +1009,7 @@ function viewPass(w, h, tx, ty, sc, o){
   const tex = [G.t.region, G.t.num, G.t.paint, G.t.height, G.t.src, G.t.pal, G.t.board], names = ['uRegion', 'uNum', 'uPaint', 'uHeight', 'uSrc', 'uPal', 'uBoard'];
   tex.forEach((t, i) => { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(pr.u[names[i]], i); });
   gl.uniform2f(pr.u.uLabel, G.W, G.H); gl.uniform2f(pr.u.uView, w, h); gl.uniform3f(pr.u.uX, tx, ty, sc);
-  gl.uniform1f(pr.u.uSel, o.sel); gl.uniform1f(pr.u.uInk, o.ink); gl.uniform1f(pr.u.uFlip, o.flip); gl.uniform1f(pr.u.uShadow, o.shadow); gl.uniform1f(pr.u.uPx, o.px); gl.uniform1f(pr.u.uReal, G.real);
+  gl.uniform1f(pr.u.uSel, o.sel); gl.uniform1f(pr.u.uInk, o.ink); gl.uniform1f(pr.u.uFlip, o.flip); gl.uniform1f(pr.u.uShadow, o.shadow); gl.uniform1f(pr.u.uPx, o.px); gl.uniform1f(pr.u.uReal, G.real); gl.uniform1f(pr.u.uPhoto, G.real ? (o.photo || 0) : 0);
   const hi = o.hi || HI_WARM; gl.uniform3fv(pr.u.uHi, hi[0]); gl.uniform3fv(pr.u.uHiEdge, hi[1]);
   gl.bindVertexArray(G.vaoEmpty); gl.drawArrays(gl.TRIANGLES, 0, 3);
   gl.activeTexture(gl.TEXTURE0);
@@ -1009,7 +1019,7 @@ function snapshot(maxSide, ink){
   if (G.boardSel === null) renderBoard(-1);
   const t = mkTex(w, h, gl.NEAREST), f = mkFbo(t);
   gl.viewport(0, 0, w, h); gl.disable(gl.BLEND); gl.disable(gl.SCISSOR_TEST);
-  viewPass(w, h, 0, 0, sc, {sel: -1, ink, flip: 0, shadow: 0, px: 1});
+  viewPass(w, h, 0, 0, sc, {sel: -1, ink, flip: 0, shadow: 0, px: 1, photo: P && P.complete ? 1 : 0});
   const px = new Uint8ClampedArray(w * h * 4); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
   gl.deleteFramebuffer(f); gl.deleteTexture(t);
   const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').putImageData(new ImageData(px, w, h), 0, 0);
@@ -1217,6 +1227,7 @@ function frame(){
     const k = Math.exp(-dt / 300); inertia.vx *= k; inertia.vy *= k; dirty = true;
     if (Math.hypot(inertia.vx, inertia.vy) < 0.03) inertia = null; else requestFrame();
   }
+  if (P.complete && P.photoT0 != null && now - P.photoT0 < 1500){ dirty = true; requestFrame(); }
   if (dirty){
     dirty = false; drawView();
     // if the device cannot keep up while things move, render a little coarser so touch stays fluid
@@ -1230,13 +1241,17 @@ function frame(){
     lastDraw = now;
   }
 }
+function photoNow(){
+  if (!P.complete || P.photoT0 == null) return 0;
+  const t = clamp((performance.now() - P.photoT0) / 1300, 0, 1); return t * t * (3 - 2 * t);
+}
 function drawView(){
   const sel = P.complete ? -1 : ST.sel;
   if (G.boardSel !== sel) renderBoard(sel);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, glc.width, glc.height);
   gl.disable(gl.BLEND); gl.disable(gl.SCISSOR_TEST); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
   viewPass(glc.width, glc.height, view.x * dpr, view.y * dpr, view.s * dpr,
-    {sel, ink: P.complete ? 0 : 1, flip: 1, shadow: 1, px: dpr, hi: sel >= 0 ? hiFor(P.palette[sel]) : null});
+    {sel, ink: P.complete ? 0 : 1, flip: 1, shadow: 1, px: dpr, hi: sel >= 0 ? hiFor(P.palette[sel]) : null, photo: photoNow()});
 }
 function stepFill(all){
   const it = fillQ[0]; if (!it) return;
@@ -1479,8 +1494,8 @@ function refreshUI(){
     b.setAttribute('aria-label', 'צבע ' + (c + 1) + (n ? ', נותרו ' + n + ' אזורים' : ', הושלם'));
   }
   $('#undo').disabled = !P.undo.length;
-  if (all && !P.complete){ P.complete = true; $('#donebar').hidden = false; $('#ring').hidden = true; }
-  else if (!all && P.complete){ P.complete = false; $('#donebar').hidden = true; }
+  if (all && !P.complete){ P.complete = true; P.photoT0 = P.busy ? -1e9 : performance.now(); $('#donebar').hidden = false; $('#ring').hidden = true; requestFrame(true); }
+  else if (!all && P.complete){ P.complete = false; P.photoT0 = null; $('#donebar').hidden = true; }
   if (!all && P.left[ST.sel] === 0 && !P.busy){
     const K = P.palette.length; let nx = -1;
     for (let i = 1; i <= K; i++){ const c = (ST.sel + i) % K; if (P.left[c] > 0){ nx = c; break; } }
@@ -1517,6 +1532,7 @@ $('#refc').addEventListener('click', () => { $('#refc').hidden = true; $('#ref')
 function drawRef(){
   const c = $('#refc'); c.width = P.W; c.height = P.H;
   const im = new ImageData(P.W, P.H), d = im.data, N = P.W * P.H;
+  if (P.hiImg){ c.getContext('2d').drawImage(P.hiImg, 0, 0, P.W, P.H); return; }
   if (P.src) d.set(P.src);
   else for (let p = 0; p < N; p++){ const k = P.palette[P.idx[p]]; d[p * 4] = k[0]; d[p * 4 + 1] = k[1]; d[p * 4 + 2] = k[2]; d[p * 4 + 3] = 255; }
   c.getContext('2d').putImageData(im, 0, 0);
@@ -1543,7 +1559,9 @@ function idle(){ $('#busy').hidden = true; }
 async function openPainting(meta, puz, ops){
   busy(0.82, 'מסמן מספרים על הבד'); await tick();
   const an = analyze(puz.idx, meta.W, meta.H);
-  P = {id: meta.id, meta, W: meta.W, H: meta.H, idx: puz.idx, palette: puz.palette, src: puz.src || null, rid: an.rid, regions: an.regions,
+  let hiImg = null;
+  if (puz.hi){ try { hiImg = await loadImg(puz.hi); } catch (e){} }
+  P = {id: meta.id, meta, W: meta.W, H: meta.H, idx: puz.idx, palette: puz.palette, src: puz.src || null, hiImg, rid: an.rid, regions: an.regions,
        ops: ops || [], undo: [], undoBytes: 0, ok: new Uint8Array(meta.W * meta.H), okTotal: 0, doneCount: 0,
        left: new Int32Array(puz.palette.length), complete: false, busy: true, pct: 0};
   for (const r of P.regions) P.left[r.c]++;
@@ -1554,8 +1572,9 @@ async function openPainting(meta, puz, ops){
   $('#pname').textContent = meta.name;
   buildPots(); drawRef(); resize(); fitView();
   let first = 0; for (let c = 0; c < P.left.length; c++) if (P.left[c] > 0){ first = c; break; }
-  P.busy = false; findI = 0;
+  findI = 0;
   selectColor(first, false); setTool(ST.tool); refreshUI();
+  P.busy = false; refreshUI();
   idle(); requestFrame(true);
   if (!ops || !ops.length) toast('צובעים את האזורים המודגשים. גרירה על אזור אחר מזיזה את הבד, שתי אצבעות מגדילות');
 }
@@ -1631,14 +1650,17 @@ function openSetup(src, name, id){
   let k = LONG / Math.max(sw, sh), W = Math.max(64, Math.round(sw * k)), H = Math.max(64, Math.round(sh * k));
   const c = $('#prev'); c.width = W; c.height = H;
   const x = c.getContext('2d', {willReadFrequently: true}); x.fillStyle = '#fff'; x.fillRect(0, 0, W, H); x.drawImage(src, 0, 0, W, H);
-  pending = {W, H, name, id};
+  // the same picture at twice the size: this is what the paint reveals, so the finished picture stays sharp
+  const hc = document.createElement('canvas'); hc.width = W * PS; hc.height = H * PS;
+  const hx = hc.getContext('2d'); hx.fillStyle = '#fff'; hx.fillRect(0, 0, hc.width, hc.height); hx.imageSmoothingQuality = 'high'; hx.drawImage(src, 0, 0, hc.width, hc.height);
+  pending = {W, H, name, id, hc};
   renderLevels(); $('#setup').hidden = false;
 }
 $('#cancel').addEventListener('click', () => { $('#setup').hidden = true; pending = null; });
 $('#go').addEventListener('click', async () => {
   if (!pending) return;
   if (!gl){ toast('הדפדפן הזה לא תומך בציור תלת־ממדי'); return; }
-  const {W, H, name, id} = pending; pending = null;
+  const {W, H, name, id, hc} = pending; pending = null;
   const src = $('#prev').getContext('2d', {willReadFrequently: true}).getImageData(0, 0, W, H).data;
   const tc = document.createElement('canvas'), tk = 360 / Math.max(W, H); tc.width = Math.round(W * tk); tc.height = Math.round(H * tk);
   tc.getContext('2d').drawImage($('#prev'), 0, 0, tc.width, tc.height);
@@ -1647,7 +1669,8 @@ $('#go').addEventListener('click', async () => {
     const lv = LEVELS.find(l => l.id === level);
     const q = await quantize(src, W, H, lv, (p, m) => busy(p * 0.8, m));
     const meta = {id, name, W, H, level, pct: 0, created: Date.now(), updated: Date.now(), thumb: tc.toDataURL('image/jpeg', 0.8)};
-    const puz = {id, idx: q.idx, palette: q.palette, src: new Uint8Array(src.buffer.slice(0))};
+    let hi = ''; try { hi = hc.toDataURL('image/jpeg', 0.93); } catch (e){}
+    const puz = hi ? {id, idx: q.idx, palette: q.palette, hi} : {id, idx: q.idx, palette: q.palette, src: new Uint8Array(src.buffer.slice(0))};
     await Store.put('puz', puz); await Store.put('ops', {id, ops: []}); await Store.put('meta', meta);
     await openPainting(meta, puz, []);
   } catch (err){ console.error(err); idle(); toast('לא הצלחתי להכין את התמונה הזאת. אפשר לנסות תמונה אחרת'); }
@@ -1747,7 +1770,7 @@ async function renderHome(){
     if (!sampleThumbs.has(s.key)) sampleThumbs.set(s.key, sampleCanvas(s, 420));
     const c = document.createElement('canvas'), t = sampleThumbs.get(s.key); c.width = t.width; c.height = t.height; c.getContext('2d').drawImage(t, 0, 0);
     const id = 'sample-' + s.key;
-    box.append(card(c, s.name, started.has(id) ? 'בתהליך' : '', () => { if (started.has(id)) resume(id); else openSetup(sampleCanvas(s, LONG), s.name, id); }));
+    box.append(card(c, s.name, started.has(id) ? 'בתהליך' : '', () => { if (started.has(id)) resume(id); else openSetup(sampleCanvas(s, LONG * PS), s.name, id); }));
   }
 }
 
